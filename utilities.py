@@ -6,6 +6,7 @@ import subprocess
 import shutil
 import glob
 import pandas as pd
+import progressbar
 
 def get_skull_stripped_anatomical(bids_root, preproc_root, subject_id, robust=False): 
     """
@@ -29,7 +30,7 @@ def get_skull_stripped_anatomical(bids_root, preproc_root, subject_id, robust=Fa
         Whether to conduct robust center estimation with BET or not. Default is False.
     """
 
-    # Format the subject ID following the BIDS convention (e.g., 'sub-001')
+    # Format the subject ID following the BIDS convention (e.g., 'sub-control01')
     subject_dir = 'sub-{}'.format(subject_id) 
     
     # Define the path to the anatomical T1-weighted image for the subject
@@ -164,3 +165,143 @@ def compute_FD_power(mot_params):
     trans_params = framewise_diff[['Translation x', 'Translation y', 'Translation z']]
     fd = converted_rots.abs().sum(axis=1) + trans_params.abs().sum(axis=1)
     return fd
+
+def combine_all_transforms(reference_volume, warp_save_name,  is_linear, epi_2_moco=None, epi_2_anat_warp=None, anat_2_standard_warp=None):
+    """
+    Combines transformation BEFORE motion correction all the way to standard space transformation
+    The various transformation steps are optional. As such, the final warp to compute is based on 
+    which transforms are provided.
+
+    Parameters
+    ----------
+    reference_volume: str
+        Reference volume. The end volume after all transformations have been applied, relevant for final resolution and field of view.
+    warp_save_name: str
+        Under which name to save the total warp
+    is_linear: bool
+        Whether the transformation is linear or non linear.
+    epi_2_moco: str
+        Transformation of the EPI volume to motion-correct it (located in the .mat/ folder of the EPI
+    epi_2_anat_warp: str
+        Transformation of the EPI volume to the anatomical space, typically obtained by epi_reg. Assumed to include fieldmap correction and thus be non-linear.
+    anat_2_standard_warp: str
+        Transformation of the anatomical volume to standard space, such as the MNI152 space. Might be linear or non linear, which affects is_linear value accordingly.
+    """
+    from fsl.wrappers import convertwarp
+    # args_base = {
+    #     'premat': epi_2_moco                 # Initial affine transformation (e.g., motion correction)
+    # }
+    args_base = {}
+    args_base['premat'] = epi_2_anat_warp  # Affine transformation from EPI to anatomical space
+    args_base['warp1'] = anat_2_standard_warp   # Non-linear warp to standard space
+
+    # # Add either a linear postmat or non-linear warp2, depending on is_linear
+    # if is_linear:
+    #     # Apply two sequential linear transformations with premat and postmat
+    #     args_base['midmat'] = epi_2_anat_warp  # Affine transformation from EPI to anatomical space
+    #     args_base['postmat'] = anat_2_standard_warp  # Final transformation to standard space
+    # else:
+    #     # Apply one linear transformation and one non-linear warp
+    #     args_base['postmat'] = epi_2_anat_warp      # Linear transformation from EPI to anatomical
+    #     args_base['warp2'] = anat_2_standard_warp   # Non-linear warp to standard space
+
+    args_filtered = {k: v for k, v in args_base.items() if v is not None}
+
+    convertwarp(warp_save_name, reference_volume, **args_filtered)
+    print("Done with warp conversion")
+
+def apply_transform(reference_volume, target_volume, output_name, transform):
+    """
+    Applies a warp field to a target volume and resamples to the space of the reference volume.
+
+    Parameters
+    ----------
+    reference_volume: str
+        The reference volume for the final interpolation, resampling and POV setting
+    target_volume: str
+        The target volume to which the warp should be applied
+    output_name: str
+        The filename under which to save the new transformed image
+    transform: str
+        The filename of the warp (assumed to be a .nii.gz file)
+
+    See also
+    --------
+    combine_all_transforms to see how to build a warp field
+    """
+    from fsl.wrappers import applywarp
+    applywarp(target_volume,reference_volume, output_name, w=transform, rel=False)
+
+def normalize_fMRI(source, output, threshold):
+    img = nib.load(source)
+    data = img.get_fdata()
+    mask = data>=threshold
+    masked_data = data[mask]
+    mean = masked_data.mean()
+    std = masked_data.std()
+    normalized = (data - mean)/std
+    img_out = nib.Nifti1Image(normalized,img.affine, img.header)
+    nib.save(img_out, output)
+
+def run_subprocess(preproc_root, ref, warp_name, split_vol, vol_nbr):
+    """
+    SAFETY GOGGLES ON
+    This function launches applywarp in parallel to reach complete result quicker
+
+    Parameters
+    -----------
+    split_vol: str
+        Path to the volume on which to apply the transformation
+    vol_nbr: str
+        Number of the volume in the timeserie. Useful to reorder volumes after the fact, since parallelisation does not honour order.
+
+    Returns
+    -------
+    out_vol: str
+        Path to the transformed volume
+    vol_nbr: str
+        Number of the volume in the timeserie. Useful to reorder volumes after the fact.
+    """
+    try:
+        split_nbr = split_vol.split('_')[-1].split('.')[0].split('split')[1]
+        epi_moco = op.join(preproc_root, 'sub-control01', 'func', 'sub-control01_task-music_concat_bold_moco.mat/', 'MAT_' + split_nbr)
+        out_vol = op.join(preproc_root, 'sub-control01', 'func', 'sub-control01_task-music_concat_bold_moco_std_vol' + split_nbr)
+        result = subprocess.run(['applywarp', '-i', split_vol, '-r', ref, '-o', out_vol, '-w', warp_name, '--abs', '--premat={}'.format(epi_moco)], check=True)
+        return out_vol, vol_nbr
+    except subprocess.CalledProcessError as e:
+        return f"applywarp for volume '{split_vol}' failed with error: {e.stderr.decode('utf-8')}"
+    
+def merge_to_mni(preproc_root, produced_vols):
+    first_vol = nib.load(produced_vols[0])
+    v_shape = first_vol.get_fdata().shape
+
+    filename = op.join(preproc_root, 'sub-control01', 'func', 'sub-control01_task-music_concat_bold_moco_bbr_std.dat')
+    large_array = np.memmap(filename, dtype=np.float64, mode='w+', shape=(v_shape[0],v_shape[1],v_shape[2], len(produced_vols)))
+
+    batch_size = len(produced_vols)//4
+
+    A = np.zeros((v_shape[0],v_shape[1],v_shape[2], batch_size))
+
+    with progressbar.ProgressBar(max_value=len(produced_vols)) as bar:
+        for batch_i in range(4):
+            print('Starting for batch {}/4'.format(batch_i+1))
+            start_batch = batch_size * batch_i
+            end_batch = min(batch_size * (batch_i+1),len(produced_vols))
+            max_len = end_batch - start_batch + 1
+            for i in range(start_batch, end_batch):
+                vol = nib.load(produced_vols[i])
+                A[:,:,:,i-start_batch] = vol.get_fdata()
+                bar.update(i)
+            large_array[:,:,:, start_batch:end_batch] = A[:,:,:,:max_len]
+    header = first_vol.header.copy()  # Copy the header of the first volume (to get right resolution, affine, Q-form etc)
+    header['dim'][0] = 4  # Specifies that this is a 4D dataset
+    header['dim'][1:5] = large_array.shape  # Update dimensions (x, y, z, t)
+    header['pixdim'][4] = 1.5  # Set the TR in the 4th dimension. You can see the TR of the data by looking at your original EPI series with fslhd, remember ;)
+    print("Done with header")
+
+    # Step 3: Create the Nifti1 image and save it to disk
+    output_path = op.join(preproc_root, 'sub-control01', 'func', 'sub-control01_task-music_concat_bold_moco_bbr_std.nii.gz')
+    img = nib.Nifti1Image(large_array, first_vol.affine, first_vol.header)
+    print("Done creating the image")
+    img.to_filename(output_path)
+    print("Done writing it to disk")
