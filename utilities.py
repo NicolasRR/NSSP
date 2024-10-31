@@ -243,6 +243,26 @@ def normalize_fMRI(source, output, threshold):
     img_out = nib.Nifti1Image(normalized,img.affine, img.header)
     nib.save(img_out, output)
 
+def normalize_fMRI_mean_std(source, output):
+    img = nib.load(source)
+    data = img.get_fdata()
+    mean = data.mean()
+    std = data.std()
+    normalized = (data - mean)/std
+    img_out = nib.Nifti1Image(normalized,img.affine, img.header)
+    nib.save(img_out, output)
+
+def normalize_fMRI_minmax(source, output):
+    img = nib.load(source)
+    data = img.get_fdata()
+    max = data.max()
+    min = data.min()
+    standardized = (data-min)/(max-min)
+    mean = standardized.mean()
+    standardized = standardized - mean
+    img_out = nib.Nifti1Image(standardized,img.affine, img.header)
+    nib.save(img_out, output)
+
 def run_subprocess(preproc_root, ref, warp_name, split_vol, vol_nbr):
     """
     SAFETY GOGGLES ON
@@ -265,7 +285,7 @@ def run_subprocess(preproc_root, ref, warp_name, split_vol, vol_nbr):
     try:
         split_nbr = split_vol.split('_')[-1].split('.')[0].split('split')[1]
         epi_moco = op.join(preproc_root, 'sub-control01', 'func', 'sub-control01_task-music_concat_bold_moco.mat/', 'MAT_' + split_nbr)
-        out_vol = op.join(preproc_root, 'sub-control01', 'func', 'sub-control01_task-music_concat_bold_moco_std_vol' + split_nbr)
+        out_vol = op.join(preproc_root, 'sub-control01', 'func', 'std', 'sub-control01_task-music_concat_bold_moco_std_vol' + split_nbr)
         result = subprocess.run(['applywarp', '-i', split_vol, '-r', ref, '-o', out_vol, '-w', warp_name, '--abs', '--premat={}'.format(epi_moco)], check=True)
         return out_vol, vol_nbr
     except subprocess.CalledProcessError as e:
@@ -276,8 +296,7 @@ def merge_to_mni(preproc_root, produced_vols):
     v_shape = first_vol.get_fdata().shape
 
     filename = op.join(preproc_root, 'sub-control01', 'func', 'sub-control01_task-music_concat_bold_moco_bbr_std.dat')
-    large_array = np.memmap(filename, dtype=np.float64, mode='w+', shape=(v_shape[0],v_shape[1],v_shape[2], len(produced_vols)))
-
+    large_array = np.memmap(filename, dtype=np.float32, mode='w+', shape=(v_shape[0],v_shape[1],v_shape[2], len(produced_vols)))
     batch_size = len(produced_vols)//4
 
     A = np.zeros((v_shape[0],v_shape[1],v_shape[2], batch_size))
@@ -293,15 +312,8 @@ def merge_to_mni(preproc_root, produced_vols):
                 A[:,:,:,i-start_batch] = vol.get_fdata()
                 bar.update(i)
             large_array[:,:,:, start_batch:end_batch] = A[:,:,:,:max_len]
-    header = first_vol.header.copy()  # Copy the header of the first volume (to get right resolution, affine, Q-form etc)
-    header['dim'][0] = 4  # Specifies that this is a 4D dataset
-    header['dim'][1:5] = large_array.shape  # Update dimensions (x, y, z, t)
-    header['pixdim'][4] = 1.5  # Set the TR in the 4th dimension. You can see the TR of the data by looking at your original EPI series with fslhd, remember ;)
-    print("Done with header")
+    large_array.flush()
+    return filename
 
-    # Step 3: Create the Nifti1 image and save it to disk
-    output_path = op.join(preproc_root, 'sub-control01', 'func', 'sub-control01_task-music_concat_bold_moco_bbr_std.nii.gz')
-    img = nib.Nifti1Image(large_array, first_vol.affine, first_vol.header)
-    print("Done creating the image")
-    img.to_filename(output_path)
-    print("Done writing it to disk")
+def smooth_volume(file_path, output_path):
+    subprocess.run(['fslmaths',file_path, '-s', str(6/2.3548), '{}_smoothed-6mm'.format(output_path)])
