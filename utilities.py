@@ -263,7 +263,7 @@ def normalize_fMRI_minmax(source, output):
     img_out = nib.Nifti1Image(standardized,img.affine, img.header)
     nib.save(img_out, output)
 
-def run_subprocess(preproc_root, ref, warp_name, split_vol, vol_nbr):
+def run_subprocess(preproc_root, ref, warp_name, split_vol, vol_nbr, number=1):
     """
     SAFETY GOGGLES ON
     This function launches applywarp in parallel to reach complete result quicker
@@ -284,8 +284,8 @@ def run_subprocess(preproc_root, ref, warp_name, split_vol, vol_nbr):
     """
     try:
         split_nbr = split_vol.split('_')[-1].split('.')[0].split('split')[1]
-        epi_moco = op.join(preproc_root, 'sub-control01', 'func', 'sub-control01_task-music_concat_bold_moco.mat/', 'MAT_' + split_nbr)
-        out_vol = op.join(preproc_root, 'sub-control01', 'func', 'std', 'sub-control01_task-music_concat_bold_moco_std_vol' + split_nbr)
+        epi_moco = op.join(preproc_root, f'sub-control0{number}', 'func', f'sub-control0{number}_task-music_concat_bold_moco.mat/', 'MAT_' + split_nbr)
+        out_vol = op.join(preproc_root, f'sub-control0{number}', 'func', 'std', f'sub-control0{number}_task-music_concat_bold_moco_std_vol' + split_nbr)
         result = subprocess.run(['applywarp', '-i', split_vol, '-r', ref, '-o', out_vol, '-w', warp_name, '--abs', '--premat={}'.format(epi_moco)], check=True)
         return out_vol, vol_nbr
     except subprocess.CalledProcessError as e:
