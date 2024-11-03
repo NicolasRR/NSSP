@@ -20,9 +20,10 @@ def loadFSL():
     import os
     # We need to do the import asynchronously, as modules rely on await within
     #asyncio.run(importFSLasync())
-    os.environ["FSLDIR"]="/data/fsl/"
-    os.environ["FSLOUTPUTTYPE"]="NIFTI_GZ"
-    os.environ["SINGULARITY_BINDPATH"]="/home/nicolasrr/Desktop/NeuroDesk/NSSP/data/"
+    username = os.getlogin()
+    os.environ["FSLDIR"]="/data/fsl/"  if "nicolas" in username else "/cvmfs/neurodesk.ardc.edu.au/containers/fsl_6.0.7.4_20231005/fsl_6.0.7.4_20231005.simg/opt/fsl-6.0.7.4/"
+    os.environ["FSLOUTPUTTYPE"]="NIFTI_GZ" 
+    os.environ["SINGULARITY_BINDPATH"]="/home/nicolasrr/Desktop/NeuroDesk/NSSP/data/" if "nicolas" in username else "/data,/neurodesktop-storage,/tmp,/cvmfs"
 
 
 def mkdir_no_exist(path):
